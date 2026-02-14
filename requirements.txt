@@ -1,0 +1,9 @@
+beautifulsoup4
+requests
+pandas
+PyPDF2
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+python-telegram-bot==13.15
