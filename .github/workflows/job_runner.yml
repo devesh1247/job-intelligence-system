@@ -25,6 +25,13 @@ jobs:
       - name: Create service account file
         run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
 
+      - name: Check for resume.pdf
+        run: |
+          if [ ! -f "resume.pdf" ]; then
+            echo "Warning: resume.pdf not found. Creating placeholder file."
+            touch resume.pdf
+          fi
+
       - name: Run job bot
         run: python job_bot.py
         env:
