@@ -58,12 +58,12 @@ def calculate_match(job_text):
 
 # --- Gmail Reader ---
 def check_emails():
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
     mail.login(EMAIL, PASSWORD)
     mail.select("inbox")
 
     result, data = mail.search(None, '(UNSEEN)')
-    mail_ids = data[0].split()
+    mail_ids = data[0].split()[-5:]   # Only process last 5 unread emails
 
     for num in mail_ids:
         result, msg_data = mail.fetch(num, "(RFC822)")
