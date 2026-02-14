@@ -1,8 +1,6 @@
 import os
 import imaplib
 import email
-import requests
-import pandas as pd
 import PyPDF2
 import gspread
 from datetime import datetime
@@ -21,6 +19,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
+
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 sheet = client.open("Job Tracker").sheet1
@@ -30,12 +29,16 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # --- Resume Text Extraction ---
 def extract_resume_text():
-    with open("resume.pdf", "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-        return text.lower()
+    try:
+        with open("resume.pdf", "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            text = ""
+            for page in reader.pages:
+                if page.extract_text():
+                    text += page.extract_text()
+            return text.lower()
+    except:
+        return ""
 
 resume_text = extract_resume_text()
 
@@ -43,9 +46,14 @@ resume_text = extract_resume_text()
 def calculate_match(job_text):
     job_words = set(job_text.lower().split())
     resume_words = set(resume_text.split())
+
+    if len(job_words) == 0:
+        return 0, ""
+
     common = job_words.intersection(resume_words)
-    score = int((len(common) / len(job_words)) * 100) if len(job_words) > 0 else 0
+    score = int((len(common) / len(job_words)) * 100)
     missing = list(job_words - resume_words)[:5]
+
     return score, ", ".join(missing)
 
 # --- Gmail Reader ---
@@ -54,7 +62,7 @@ def check_emails():
     mail.login(EMAIL, PASSWORD)
     mail.select("inbox")
 
-    result, data = mail.search(None, '(UNSEEN SUBJECT "Job Alert")')
+    result, data = mail.search(None, '(UNSEEN)')
     mail_ids = data[0].split()
 
     for num in mail_ids:
@@ -63,21 +71,39 @@ def check_emails():
         msg = email.message_from_bytes(raw_email)
 
         subject = msg["subject"]
-        date = msg["date"]
 
+        if subject is None:
+            continue
+
+        subject_lower = subject.lower()
+
+        # Filter only real job result emails
+        if (
+            "job alert" not in subject_lower and
+            "new jobs" not in subject_lower and
+            "jobs for you" not in subject_lower
+        ):
+            continue
+
+        # Skip confirmation emails
+        if "has been created" in subject_lower:
+            continue
+
+        # Extract body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type() == "text/html":
-                    body = part.get_payload(decode=True).decode()
+                    body = part.get_payload(decode=True).decode(errors="ignore")
         else:
-            body = msg.get_payload(decode=True).decode()
+            body = msg.get_payload(decode=True).decode(errors="ignore")
 
         soup = BeautifulSoup(body, "html.parser")
         text = soup.get_text()
 
         score, missing = calculate_match(text)
 
+        # Append to Google Sheet
         sheet.append_row([
             "Unknown Company",
             subject,
@@ -88,6 +114,7 @@ def check_emails():
             str(datetime.now())
         ])
 
+        # Send Telegram Notification
         bot.send_message(
             chat_id=CHAT_ID,
             text=f"🚀 New Job Alert\n\nRole: {subject}\nMatch Score: {score}%\nMissing: {missing}"
