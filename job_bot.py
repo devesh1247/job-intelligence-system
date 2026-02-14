@@ -17,7 +17,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # --- Google Sheets Setup ---
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 sheet = client.open("Job Tracker").sheet1
