@@ -55,12 +55,33 @@ def calculate_match(job_text):
 
     return score, ", ".join(missing)
 
-# --- Extract First URL From Email ---
-def extract_job_link(text):
-    urls = re.findall(r'https?://\S+', text)
-    if urls:
-        return urls[0]
-    return None
+# --- Extract ALL Job Links ---
+def extract_job_links(text):
+    urls = re.findall(r'https?://[^\s"]+', text)
+    clean_links = []
+
+    for url in urls:
+        url_lower = url.lower()
+
+        # Skip unsubscribe and tracking links
+        if "unsubscribe" in url_lower:
+            continue
+        if "google.com" in url_lower and "jobs" not in url_lower:
+            continue
+
+        # Keep common job platforms
+        if any(site in url_lower for site in [
+            "linkedin.com",
+            "indeed.com",
+            "naukri.com",
+            "foundit.in",
+            "monster.com",
+            "timesjobs.com"
+        ]):
+            clean_links.append(url)
+
+    # Remove duplicates
+    return list(set(clean_links))
 
 # --- Fetch Job Page ---
 def fetch_job_details(url):
@@ -70,7 +91,6 @@ def fetch_job_details(url):
         soup = BeautifulSoup(response.text, "html.parser")
 
         title = soup.title.string.strip() if soup.title else "Unknown Role"
-
         paragraphs = soup.find_all("p")
         description = " ".join([p.get_text() for p in paragraphs])
 
@@ -99,7 +119,8 @@ def check_emails():
 
         subject_lower = subject.lower()
 
-        if "job" not in subject_lower:
+        # Skip alert creation emails
+        if "has been created" in subject_lower:
             continue
 
         body = ""
@@ -113,30 +134,53 @@ def check_emails():
         soup = BeautifulSoup(body, "html.parser")
         email_text = soup.get_text()
 
-        job_link = extract_job_link(email_text)
-        if not job_link:
+        # --- Extract ALL job links ---
+        job_links = extract_job_links(email_text)
+
+        if not job_links:
             continue
 
-        role_title, job_description = fetch_job_details(job_link)
-        score, missing = calculate_match(job_description)
+        relevant_jobs = []
+
+        for link in job_links:
+            role_title, job_description = fetch_job_details(link)
+            score, missing = calculate_match(job_description)
+
+            # Only notify if strong match
+            if score >= 30:   # Adjust threshold if needed
+                relevant_jobs.append((role_title, link, score, missing))
+
+        # If no relevant jobs → skip email
+        if not relevant_jobs:
+            continue
 
         # --- Convert UTC to IST ---
         ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
         formatted_time = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
-        sheet.append_row([
-            "Extracted",
-            role_title,
-            "Email Link",
-            job_link,
-            score,
-            missing,
-            formatted_time
-        ])
+        telegram_message = "🚀 High Match Jobs Found\n\n"
+
+        for role_title, link, score, missing in relevant_jobs:
+
+            sheet.append_row([
+                "Extracted",
+                role_title,
+                "Email Link",
+                link,
+                score,
+                missing,
+                formatted_time
+            ])
+
+            telegram_message += (
+                f"Role: {role_title}\n"
+                f"Match: {score}%\n"
+                f"Link: {link}\n\n"
+            )
 
         bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🚀 New Job Found\n\nRole: {role_title}\nMatch: {score}%\nTime: {formatted_time}\nLink: {job_link}"
+            text=telegram_message
         )
 
     mail.logout()
