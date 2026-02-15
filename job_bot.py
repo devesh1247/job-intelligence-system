@@ -1,32 +1,28 @@
 import os
 import imaplib
 import email
-import requests
+import re
+import hashlib
+from datetime import datetime, timedelta
+from email.header import decode_header
+
 import PyPDF2
 import gspread
-import re
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from email.header import decode_header
 from google.oauth2.service_account import Credentials
 from telegram import Bot
 
-# ===============================
+# ==============================
 # LOAD ENV VARIABLES
-# ===============================
+# ==============================
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# ===============================
-# TELEGRAM
-# ===============================
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# ===============================
-# GOOGLE SHEETS
-# ===============================
+# ==============================
+# GOOGLE SHEETS SETUP
+# ==============================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -39,160 +35,104 @@ creds = Credentials.from_service_account_file(
 client = gspread.authorize(creds)
 sheet = client.open("Job Tracker").sheet1
 
-# ===============================
+# ==============================
+# TELEGRAM
+# ==============================
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# ==============================
 # LOAD RESUME TEXT
-# ===============================
+# ==============================
 def extract_resume_text():
     try:
         with open("resume.pdf", "rb") as f:
             reader = PyPDF2.PdfReader(f)
             text = ""
             for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text
+                if page.extract_text():
+                    text += page.extract_text()
             return text.lower()
     except:
         return ""
 
 resume_text = extract_resume_text()
 
-resume_words = set(resume_text.split())
+# ==============================
+# SMART KEYWORDS (Weighted)
+# ==============================
+PRIMARY_KEYWORDS = [
+    "python", "data", "analysis", "analyst",
+    "machine learning", "django", "sql",
+    "backend", "developer", "software engineer"
+]
 
-# ===============================
-# SMART KEYWORD WEIGHT SYSTEM
-# ===============================
-IMPORTANT_KEYWORDS = {
-    "python": 6,
-    "django": 5,
-    "flask": 4,
-    "sql": 4,
-    "machine learning": 6,
-    "data": 4,
-    "analysis": 4,
-    "developer": 3,
-    "engineer": 3,
-    "pandas": 3,
-    "numpy": 3,
-    "api": 3,
-    "backend": 4,
-}
+SECONDARY_KEYWORDS = [
+    "api", "pandas", "numpy", "flask",
+    "automation", "ai", "deep learning",
+    "etl", "cloud", "aws", "azure"
+]
 
-def calculate_score(job_text):
-    if not job_text:
-        return 0
+# ==============================
+# CLEAN SUBJECT (Fix UTF Encoding)
+# ==============================
+def clean_subject(subject):
+    decoded = decode_header(subject)
+    result = ""
+    for part, encoding in decoded:
+        if isinstance(part, bytes):
+            result += part.decode(encoding or "utf-8", errors="ignore")
+        else:
+            result += part
+    return result
 
-    text = job_text.lower()
+# ==============================
+# SCORE FUNCTION (Weighted)
+# ==============================
+def calculate_score(text):
+    text = text.lower()
     score = 0
 
-    # weighted keywords
-    for keyword, weight in IMPORTANT_KEYWORDS.items():
-        if keyword in text:
-            score += weight
+    for word in PRIMARY_KEYWORDS:
+        if word in text:
+            score += 10
 
-    # resume similarity bonus
-    job_words = set(text.split())
-    common = job_words.intersection(resume_words)
-
-    score += min(len(common), 15)
+    for word in SECONDARY_KEYWORDS:
+        if word in text:
+            score += 5
 
     return score
 
-# ===============================
-# DECODE SUBJECT
-# ===============================
-def decode_subject(subject):
-    decoded = decode_header(subject)
-    text = ""
-    for part, enc in decoded:
-        if isinstance(part, bytes):
-            text += part.decode(enc or "utf-8", errors="ignore")
-        else:
-            text += part
-    return text
-
-# ===============================
-# EXTRACT LINKS
-# ===============================
-def extract_links(text):
-    urls = re.findall(r'https?://[^\s"]+', text)
-    clean = []
-
-    for url in urls:
-        lower = url.lower()
-
-        if "unsubscribe" in lower:
-            continue
-        if "privacy" in lower:
-            continue
-
-        clean.append(url)
-
-    return list(set(clean))
-
-# ===============================
-# RESOLVE REDIRECT
-# ===============================
-def resolve_redirect(url):
+# ==============================
+# REMOVE DUPLICATES
+# ==============================
+def already_exists(unique_id):
     try:
-        response = requests.get(url, timeout=15, allow_redirects=True)
-        return response.url
-    except:
-        return url
-
-# ===============================
-# FETCH JOB PAGE
-# ===============================
-def fetch_job_page(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        title = soup.title.string.strip() if soup.title else "Unknown Role"
-        description = soup.get_text()
-
-        return title, description
-    except:
-        return "Unknown Role", ""
-
-# ===============================
-# DUPLICATE CHECK
-# ===============================
-def is_duplicate(link):
-    try:
-        links = sheet.col_values(4)
-        return link in links
+        records = sheet.col_values(1)
+        return unique_id in records
     except:
         return False
 
-# ===============================
-# MAIN FUNCTION
-# ===============================
+# ==============================
+# MAIN EMAIL CHECK
+# ==============================
 def check_emails():
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL, PASSWORD)
     mail.select("inbox")
 
     result, data = mail.search(None, '(UNSEEN)')
-    mail_ids = data[0].split()[-10:]
+    mail_ids = data[0].split()
 
     for num in mail_ids:
         result, msg_data = mail.fetch(num, "(RFC822)")
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        if not msg["subject"]:
+        subject = msg["subject"]
+        if subject is None:
             continue
 
-        subject = decode_subject(msg["subject"])
-        subject_lower = subject.lower()
-
-        # Filter only job-related emails
-        if not any(word in subject_lower for word in [
-            "job", "hiring", "developer", "engineer", "python", "data"
-        ]):
-            continue
+        subject = clean_subject(subject)
 
         body = ""
         if msg.is_multipart():
@@ -205,48 +145,51 @@ def check_emails():
         soup = BeautifulSoup(body, "html.parser")
         email_text = soup.get_text()
 
-        links = extract_links(email_text)
+        full_text = subject + " " + email_text
 
-        for link in links:
-            final_url = resolve_redirect(link)
+        score = calculate_score(full_text)
 
-            if is_duplicate(final_url):
-                continue
+        # Skip low relevance
+        if score < 10:
+            continue
 
-            title, description = fetch_job_page(final_url)
+        # Unique ID to avoid duplicate alerts
+        unique_id = hashlib.md5(subject.encode()).hexdigest()
+        if already_exists(unique_id):
+            continue
 
-            score = calculate_score(description)
+        # IST Time
+        ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+        formatted_time = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
-            if score < 12:   # Smart threshold
-                continue
+        # Extract first link
+        links = re.findall(r'https?://[^\s"]+', email_text)
+        job_link = links[0] if links else "Check Email"
 
-            ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
-            time_str = ist_time.strftime("%d-%m-%Y %H:%M IST")
+        # Save to sheet
+        sheet.append_row([
+            unique_id,
+            subject,
+            job_link,
+            score,
+            formatted_time
+        ])
 
-            sheet.append_row([
-                "Smart Classified",
-                title,
-                "Job Link",
-                final_url,
-                score,
-                time_str
-            ])
+        # Send Telegram
+        message = (
+            f"🚀 Job Alert\n\n"
+            f"Role: {subject}\n"
+            f"Score: {score}\n"
+            f"Time: {formatted_time}\n"
+            f"Link: {job_link}"
+        )
 
-            bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"""🚀 Smart Job Alert
-
-Role: {title}
-Score: {score}
-Time: {time_str}
-
-Apply Here:
-{final_url}
-"""
-            )
+        bot.send_message(chat_id=CHAT_ID, text=message)
 
     mail.logout()
 
-
+# ==============================
+# RUN
+# ==============================
 if __name__ == "__main__":
     check_emails()
