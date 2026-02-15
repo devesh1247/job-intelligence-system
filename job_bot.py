@@ -5,15 +5,16 @@ import requests
 import PyPDF2
 import gspread
 import re
+import hashlib
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+from email.header import decode_header
 from google.oauth2.service_account import Credentials
 from telegram import Bot
 
 # ==============================
 # LOAD ENV VARIABLES
 # ==============================
-
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,78 +23,105 @@ CHAT_ID = os.getenv("CHAT_ID")
 # ==============================
 # GOOGLE SHEETS SETUP
 # ==============================
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = Credentials.from_service_account_file(
-    "service_account.json", scopes=SCOPES
-)
+creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 sheet = client.open("Job Tracker").sheet1
 
 # ==============================
-# TELEGRAM BOT
+# TELEGRAM
 # ==============================
-
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ==============================
-# EXTRACT RESUME TEXT
+# LOAD RESUME TEXT
 # ==============================
-
 def extract_resume_text():
     try:
         with open("resume.pdf", "rb") as f:
             reader = PyPDF2.PdfReader(f)
             text = ""
             for page in reader.pages:
-                if page.extract_text():
-                    text += page.extract_text()
-            print("Resume loaded successfully.")
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text
             return text.lower()
-    except Exception as e:
-        print("Resume read error:", e)
+    except:
         return ""
 
 resume_text = extract_resume_text()
 
 # ==============================
-# MATCH SCORE
+# SMART KEYWORD WEIGHT SCORING
 # ==============================
+IMPORTANT_KEYWORDS = {
+    "python": 5,
+    "django": 4,
+    "flask": 3,
+    "sql": 3,
+    "machine": 4,
+    "learning": 4,
+    "data": 4,
+    "analysis": 3,
+    "developer": 3,
+    "engineer": 3,
+    "pandas": 2,
+    "numpy": 2,
+}
 
 def calculate_match(job_text):
     if not job_text:
         return 0
 
-    job_words = set(job_text.lower().split())
+    text = job_text.lower()
+    score = 0
+
+    for keyword, weight in IMPORTANT_KEYWORDS.items():
+        if keyword in text:
+            score += weight
+
+    # Bonus if many resume words match
+    job_words = set(text.split())
     resume_words = set(resume_text.split())
-
-    if not job_words:
-        return 0
-
     common = job_words.intersection(resume_words)
-    score = int((len(common) / len(job_words)) * 100)
+
+    score += min(len(common), 10)
 
     return score
 
 # ==============================
+# SUBJECT DECODER
+# ==============================
+def decode_subject(subject):
+    decoded_parts = decode_header(subject)
+    subject_text = ""
+
+    for part, encoding in decoded_parts:
+        if isinstance(part, bytes):
+            subject_text += part.decode(encoding or "utf-8", errors="ignore")
+        else:
+            subject_text += part
+
+    return subject_text
+
+# ==============================
 # EXTRACT JOB LINKS
 # ==============================
-
-def extract_job_links(text):
+def extract_links(text):
     urls = re.findall(r'https?://[^\s"]+', text)
-    clean_links = []
+    clean = []
 
     for url in urls:
-        url_lower = url.lower()
+        lower = url.lower()
 
-        if "unsubscribe" in url_lower:
+        if "unsubscribe" in lower:
             continue
 
-        if any(site in url_lower for site in [
+        if any(site in lower for site in [
             "linkedin.com",
             "indeed.com",
             "naukri.com",
@@ -102,66 +130,74 @@ def extract_job_links(text):
             "timesjobs",
             "google.com"
         ]):
-            clean_links.append(url)
+            clean.append(url)
 
-    return list(set(clean_links))
+    return list(set(clean))
 
 # ==============================
 # FETCH JOB PAGE
 # ==============================
-
-def fetch_job_details(url):
+def fetch_job(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
 
         title = soup.title.string.strip() if soup.title else "Unknown Role"
         paragraphs = soup.find_all("p")
-        description = " ".join([p.get_text() for p in paragraphs])
+        description = " ".join(p.get_text() for p in paragraphs)
 
         return title, description
-    except Exception as e:
-        print("Error fetching job page:", e)
+    except:
         return "Unknown Role", ""
 
 # ==============================
-# MAIN EMAIL CHECK
+# DUPLICATE CHECK
 # ==============================
+def is_duplicate(link):
+    try:
+        records = sheet.col_values(4)  # link column
+        return link in records
+    except:
+        return False
 
+# ==============================
+# MAIN EMAIL CHECKER
+# ==============================
 def check_emails():
-    print("Connecting to Gmail...")
-
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL, PASSWORD)
     mail.select("inbox")
 
-    # ✅ CHECK LAST 2 DAYS EMAILS (NOT UNSEEN)
-    date = (datetime.now() - timedelta(days=2)).strftime("%d-%b-%Y")
-    result, data = mail.search(None, f'(SINCE "{date}")')
+    result, data = mail.search(None, '(UNSEEN)')
+    mail_ids = data[0].split()[-10:]
 
-    mail_ids = data[0].split()
-
-    print("Emails found:", len(mail_ids))
-
-    for num in mail_ids[-10:]:
+    for num in mail_ids:
         result, msg_data = mail.fetch(num, "(RFC822)")
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        subject = msg["subject"]
-        if not subject:
+        raw_subject = msg["subject"]
+        if not raw_subject:
             continue
 
+        subject = decode_subject(raw_subject)
         subject_lower = subject.lower()
 
-        if "has been created" in subject_lower:
+        # FILTER NON JOB EMAILS
+        if not any(word in subject_lower for word in [
+            "job", "hiring", "developer", "engineer", "python", "data"
+        ]):
             continue
 
-        print("\nChecking email:", subject)
+        # SKIP SUMMARY ALERTS
+        if "new jobs for" in subject_lower:
+            continue
 
+        # EXTRACT BODY
         body = ""
-
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type() == "text/html":
@@ -172,69 +208,56 @@ def check_emails():
         soup = BeautifulSoup(body, "html.parser")
         email_text = soup.get_text()
 
-        relevant_jobs = []
+        links = extract_links(email_text)
+        found_relevant = False
 
-        # -------- STEP 1: CHECK LINKS --------
-        job_links = extract_job_links(email_text)
-        print("Links found:", len(job_links))
+        # =========================
+        # CHECK ALL LINKS
+        # =========================
+        for link in links:
+            if is_duplicate(link):
+                continue
 
-        for link in job_links:
-            title, description = fetch_job_details(link)
+            title, description = fetch_job(link)
             score = calculate_match(description)
 
-            print("Role:", title)
-            print("Score:", score)
+            if score >= 8:   # Smart threshold
+                found_relevant = True
 
-            # ⚠ TEMPORARY FOR TESTING → always notify
-            if score >= 0:
-                relevant_jobs.append((title, link, score))
-
-        # -------- STEP 2: CHECK EMAIL TEXT DIRECTLY --------
-        if not relevant_jobs:
-            score = calculate_match(email_text)
-            print("Email Content Score:", score)
-
-            if score >= 0:
-                relevant_jobs.append((subject, "From Email Content", score))
-
-        # -------- SEND TELEGRAM --------
-        if relevant_jobs:
-            ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
-            formatted_time = ist_time.strftime("%d-%m-%Y %H:%M IST")
-
-            telegram_message = "🚀 Job Alert Found\n\n"
-
-            for role_title, link, score in relevant_jobs:
+                ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+                time_str = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
                 sheet.append_row([
                     "Extracted",
-                    role_title,
+                    title,
+                    "Link",
                     link,
                     score,
-                    formatted_time
+                    time_str
                 ])
 
-                telegram_message += (
-                    f"Role: {role_title}\n"
-                    f"Match: {score}%\n"
-                    f"Source: {link}\n\n"
-                )
-
-            try:
                 bot.send_message(
                     chat_id=CHAT_ID,
-                    text=telegram_message
+                    text=f"🚀 Job Alert Found\n\nRole: {title}\nMatch Score: {score}\nTime: {time_str}\nLink: {link}"
                 )
-                print("Telegram notification sent.")
-            except Exception as e:
-                print("Telegram error:", e)
+
+        # =========================
+        # FALLBACK TO EMAIL TEXT
+        # =========================
+        if not links:
+            score = calculate_match(email_text)
+
+            if score >= 10:
+                ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+                time_str = ist_time.strftime("%d-%m-%Y %H:%M IST")
+
+                bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🚀 Job Alert Found\n\nRole: {subject}\nMatch Score: {score}\nTime: {time_str}\nSource: Email Content"
+                )
 
     mail.logout()
-    print("Finished checking emails.")
 
-# ==============================
-# RUN
-# ==============================
 
 if __name__ == "__main__":
     check_emails()
