@@ -31,18 +31,25 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # --- Resume Text Extraction ---
 def extract_resume_text():
-    with open("resume.pdf", "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        text = ""
-        for page in reader.pages:
-            if page.extract_text():
-                text += page.extract_text()
-        return text.lower()
+    try:
+        with open("resume.pdf", "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            text = ""
+            for page in reader.pages:
+                if page.extract_text():
+                    text += page.extract_text()
+            return text.lower()
+    except Exception as e:
+        print(f"Error reading resume: {e}")
+        return ""
 
 resume_text = extract_resume_text()
 
 # --- Match Score ---
 def calculate_match(job_text):
+    if not job_text:
+        return 0, ""
+        
     job_words = set(job_text.lower().split())
     resume_words = set(resume_text.split())
 
@@ -86,7 +93,7 @@ def extract_job_links(text):
 # --- Fetch Job Page ---
 def fetch_job_details(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
 
@@ -96,11 +103,13 @@ def fetch_job_details(url):
 
         return title, description
 
-    except:
+    except Exception as e:
+        print(f"Failed to fetch {url}: {e}")
         return "Unknown Role", ""
 
 # --- Gmail Reader ---
 def check_emails():
+    print("Connecting to Gmail...")
     mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
     mail.login(EMAIL, PASSWORD)
     mail.select("inbox")
@@ -134,21 +143,32 @@ def check_emails():
         soup = BeautifulSoup(body, "html.parser")
         email_text = soup.get_text()
 
+        # --- DEBUG PRINTS ---
+        print("----- EMAIL SUBJECT -----")
+        print(subject)
+        print("----- EMAIL TEXT PREVIEW -----")
+        print(email_text[:500])
+
         relevant_jobs = []
 
         # ---------- STEP 1: CHECK ALL LINKS ----------
         job_links = extract_job_links(email_text)
+        print("Extracted Links:", job_links)
 
         for link in job_links:
+            print("Checking link:", link)
             role_title, job_description = fetch_job_details(link)
             score, missing = calculate_match(job_description)
+            print("Score:", score)
 
             if score >= 30:
                 relevant_jobs.append((role_title, link, score, missing))
 
         # ---------- STEP 2: IF NO MATCH FROM LINKS → CHECK EMAIL TEXT ----------
         if not relevant_jobs:
+            print("No links matched. Checking direct email text...")
             score, missing = calculate_match(email_text)
+            print("Email Content Score:", score)
 
             if score >= 30:
                 relevant_jobs.append((
@@ -160,6 +180,7 @@ def check_emails():
 
         # If still nothing relevant → skip
         if not relevant_jobs:
+            print("No relevant jobs found in this email.")
             continue
 
         # --- Convert UTC to IST ---
@@ -169,7 +190,6 @@ def check_emails():
         telegram_message = "🚀 High Match Job Found\n\n"
 
         for role_title, link, score, missing in relevant_jobs:
-
             sheet.append_row([
                 "Extracted",
                 role_title,
@@ -186,11 +206,16 @@ def check_emails():
                 f"Source: {link}\n\n"
             )
 
-        bot.send_message(
-            chat_id=CHAT_ID,
-            text=telegram_message
-        )
+        try:
+            bot.send_message(
+                chat_id=CHAT_ID,
+                text=telegram_message
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
     mail.logout()
+    print("Finished checking emails.")
 
-check_emails()
+if __name__ == "__main__":
+    check_emails()
