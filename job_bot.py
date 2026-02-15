@@ -5,7 +5,7 @@ import requests
 import PyPDF2
 import gspread
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from telegram import Bot
@@ -65,15 +65,12 @@ def extract_job_link(text):
 # --- Fetch Job Page ---
 def fetch_job_details(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
 
-        title = soup.title.string if soup.title else "Unknown Role"
+        title = soup.title.string.strip() if soup.title else "Unknown Role"
 
-        # Try to extract meaningful text
         paragraphs = soup.find_all("p")
         description = " ".join([p.get_text() for p in paragraphs])
 
@@ -117,13 +114,15 @@ def check_emails():
         email_text = soup.get_text()
 
         job_link = extract_job_link(email_text)
-
         if not job_link:
             continue
 
         role_title, job_description = fetch_job_details(job_link)
-
         score, missing = calculate_match(job_description)
+
+        # --- Convert UTC to IST ---
+        ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+        formatted_time = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
         sheet.append_row([
             "Extracted",
@@ -132,12 +131,12 @@ def check_emails():
             job_link,
             score,
             missing,
-            str(datetime.now())
+            formatted_time
         ])
 
         bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🚀 New Job Found\n\nRole: {role_title}\nMatch: {score}%\nLink: {job_link}"
+            text=f"🚀 New Job Found\n\nRole: {role_title}\nMatch: {score}%\nTime: {formatted_time}\nLink: {job_link}"
         )
 
     mail.logout()
