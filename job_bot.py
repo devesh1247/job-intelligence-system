@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from telegram import Bot
-
+ 
 # ------------------ LOAD SECRETS ------------------
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
