@@ -1,8 +1,10 @@
 import os
 import imaplib
 import email
+import requests
 import PyPDF2
 import gspread
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
@@ -29,20 +31,17 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # --- Resume Text Extraction ---
 def extract_resume_text():
-    try:
-        with open("resume.pdf", "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            text = ""
-            for page in reader.pages:
-                if page.extract_text():
-                    text += page.extract_text()
-            return text.lower()
-    except:
-        return ""
+    with open("resume.pdf", "rb") as f:
+        reader = PyPDF2.PdfReader(f)
+        text = ""
+        for page in reader.pages:
+            if page.extract_text():
+                text += page.extract_text()
+        return text.lower()
 
 resume_text = extract_resume_text()
 
-# --- Match Score Function ---
+# --- Match Score ---
 def calculate_match(job_text):
     job_words = set(job_text.lower().split())
     resume_words = set(resume_text.split())
@@ -56,6 +55,33 @@ def calculate_match(job_text):
 
     return score, ", ".join(missing)
 
+# --- Extract First URL From Email ---
+def extract_job_link(text):
+    urls = re.findall(r'https?://\S+', text)
+    if urls:
+        return urls[0]
+    return None
+
+# --- Fetch Job Page ---
+def fetch_job_details(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        title = soup.title.string if soup.title else "Unknown Role"
+
+        # Try to extract meaningful text
+        paragraphs = soup.find_all("p")
+        description = " ".join([p.get_text() for p in paragraphs])
+
+        return title, description
+
+    except:
+        return "Unknown Role", ""
+
 # --- Gmail Reader ---
 def check_emails():
     mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
@@ -63,7 +89,7 @@ def check_emails():
     mail.select("inbox")
 
     result, data = mail.search(None, '(UNSEEN)')
-    mail_ids = data[0].split()[-5:]   # Only process last 5 unread emails
+    mail_ids = data[0].split()[-5:]
 
     for num in mail_ids:
         result, msg_data = mail.fetch(num, "(RFC822)")
@@ -71,25 +97,14 @@ def check_emails():
         msg = email.message_from_bytes(raw_email)
 
         subject = msg["subject"]
-
         if subject is None:
             continue
 
         subject_lower = subject.lower()
 
-        # Filter only real job result emails
-        if (
-            "job alert" not in subject_lower and
-            "new jobs" not in subject_lower and
-            "jobs for you" not in subject_lower
-        ):
+        if "job" not in subject_lower:
             continue
 
-        # Skip confirmation emails
-        if "has been created" in subject_lower:
-            continue
-
-        # Extract body
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
@@ -99,25 +114,30 @@ def check_emails():
             body = msg.get_payload(decode=True).decode(errors="ignore")
 
         soup = BeautifulSoup(body, "html.parser")
-        text = soup.get_text()
+        email_text = soup.get_text()
 
-        score, missing = calculate_match(text)
+        job_link = extract_job_link(email_text)
 
-        # Append to Google Sheet
+        if not job_link:
+            continue
+
+        role_title, job_description = fetch_job_details(job_link)
+
+        score, missing = calculate_match(job_description)
+
         sheet.append_row([
-            "Unknown Company",
-            subject,
-            "Email Alert",
-            "Check Email",
+            "Extracted",
+            role_title,
+            "Email Link",
+            job_link,
             score,
             missing,
             str(datetime.now())
         ])
 
-        # Send Telegram Notification
         bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🚀 New Job Alert\n\nRole: {subject}\nMatch Score: {score}%\nMissing: {missing}"
+            text=f"🚀 New Job Found\n\nRole: {role_title}\nMatch: {score}%\nLink: {job_link}"
         )
 
     mail.logout()
