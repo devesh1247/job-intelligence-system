@@ -63,13 +63,14 @@ def extract_job_links(text):
     for url in urls:
         url_lower = url.lower()
 
-        # Skip unsubscribe and tracking links
         if "unsubscribe" in url_lower:
             continue
-        if "google.com" in url_lower and "jobs" not in url_lower:
+
+        # Allow Google job links
+        if "google.com" in url_lower:
+            clean_links.append(url)
             continue
 
-        # Keep common job platforms
         if any(site in url_lower for site in [
             "linkedin.com",
             "indeed.com",
@@ -80,7 +81,6 @@ def extract_job_links(text):
         ]):
             clean_links.append(url)
 
-    # Remove duplicates
     return list(set(clean_links))
 
 # --- Fetch Job Page ---
@@ -134,23 +134,31 @@ def check_emails():
         soup = BeautifulSoup(body, "html.parser")
         email_text = soup.get_text()
 
-        # --- Extract ALL job links ---
-        job_links = extract_job_links(email_text)
-
-        if not job_links:
-            continue
-
         relevant_jobs = []
+
+        # ---------- STEP 1: CHECK ALL LINKS ----------
+        job_links = extract_job_links(email_text)
 
         for link in job_links:
             role_title, job_description = fetch_job_details(link)
             score, missing = calculate_match(job_description)
 
-            # Only notify if strong match
-            if score >= 30:   # Adjust threshold if needed
+            if score >= 30:
                 relevant_jobs.append((role_title, link, score, missing))
 
-        # If no relevant jobs → skip email
+        # ---------- STEP 2: IF NO MATCH FROM LINKS → CHECK EMAIL TEXT ----------
+        if not relevant_jobs:
+            score, missing = calculate_match(email_text)
+
+            if score >= 30:
+                relevant_jobs.append((
+                    subject,
+                    "From Email Content",
+                    score,
+                    missing
+                ))
+
+        # If still nothing relevant → skip
         if not relevant_jobs:
             continue
 
@@ -158,14 +166,14 @@ def check_emails():
         ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
         formatted_time = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
-        telegram_message = "🚀 High Match Jobs Found\n\n"
+        telegram_message = "🚀 High Match Job Found\n\n"
 
         for role_title, link, score, missing in relevant_jobs:
 
             sheet.append_row([
                 "Extracted",
                 role_title,
-                "Email Link",
+                "Email or Link",
                 link,
                 score,
                 missing,
@@ -175,7 +183,7 @@ def check_emails():
             telegram_message += (
                 f"Role: {role_title}\n"
                 f"Match: {score}%\n"
-                f"Link: {link}\n\n"
+                f"Source: {link}\n\n"
             )
 
         bot.send_message(
